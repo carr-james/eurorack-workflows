@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: 'erc,drc'
+      include-assembly-files:
+        description: 'Include BOM and position CSV files for assembly services (e.g., JLCPCB SMT)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -82,22 +87,39 @@ jobs:
           # Store for next steps
           cat /tmp/artifact-paths.txt
 
-      - name: Upload artifacts
+      - name: Upload artifacts (core files)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.project-name }}-${{ github.ref_name }}
           path: |
             output/*-gerbers.zip
+            output/*/ibom/*.html
+
+      - name: Upload artifacts (assembly files)
+        if: inputs.include-assembly-files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project-name }}-${{ github.ref_name }}-assembly
+          path: |
             output/*/bom/*.csv
             output/*/position/*.csv
 
-      - name: Create Release
+      - name: Create Release (core files)
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: ${{ inputs.project-name }} ${{ github.ref_name }}
           files: |
             output/*-gerbers.zip
+            output/*/ibom/*.html
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release (assembly files)
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/') && inputs.include-assembly-files
+        with:
+          files: |
             output/*/bom/*.csv
             output/*/position/*.csv
         env:
