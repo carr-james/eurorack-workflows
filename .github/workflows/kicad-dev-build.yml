@@ -1,0 +1,102 @@
+name: KiCad Dev Build
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: 'Project name for the dev build'
+        required: true
+        type: string
+      boards:
+        description: 'JSON array of board configurations. Each board should have: name, kibot_config, pcb_path, sch_path'
+        required: true
+        type: string
+      skip-checks:
+        description: 'Skip ERC and DRC checks (comma-separated, e.g., "erc,drc")'
+        required: false
+        type: string
+        default: 'erc,drc'
+      include-assembly-files:
+        description: 'Include BOM and position CSV files for assembly services (e.g., JLCPCB SMT)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  # Delete old dev artifacts to keep only the latest
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete previous dev build artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: ${{ inputs.project-name }}-dev-latest
+          failOnError: false
+
+  build:
+    needs: cleanup
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/inti-cmnb/kicad_auto:dev_k9
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y zip jq
+
+      - name: Generate fabrication files
+        run: |
+          # Parse the boards JSON array
+          echo '${{ inputs.boards }}' | jq -c '.[]' | while read board; do
+            BOARD_NAME=$(echo "$board" | jq -r '.name')
+            KIBOT_CONFIG=$(echo "$board" | jq -r '.kibot_config')
+            PCB_PATH=$(echo "$board" | jq -r '.pcb_path')
+            SCH_PATH=$(echo "$board" | jq -r '.sch_path')
+
+            echo "=========================================="
+            echo "Processing board: $BOARD_NAME"
+            echo "KiBot config: $KIBOT_CONFIG"
+            echo "PCB: $PCB_PATH"
+            echo "Schematic: $SCH_PATH"
+            echo "=========================================="
+
+            kibot \
+              -c "$KIBOT_CONFIG" \
+              -b "$PCB_PATH" \
+              -e "$SCH_PATH" \
+              -d "output/$BOARD_NAME" \
+              -s ${{ inputs.skip-checks }}
+          done
+
+      - name: Create ZIP archives for manufacturers
+        run: |
+          cd output
+          echo '${{ inputs.boards }}' | jq -r '.[].name' | while read BOARD_NAME; do
+            if [ -d "$BOARD_NAME/gerbers" ]; then
+              echo "Creating ZIP for $BOARD_NAME"
+              (cd "$BOARD_NAME/gerbers" && zip -r "../../${BOARD_NAME}-gerbers.zip" *)
+            fi
+          done
+
+      - name: Upload dev build artifacts (core files)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project-name }}-dev-latest
+          path: |
+            output/*-gerbers.zip
+            output/*/ibom/*.html
+
+      - name: Upload dev build artifacts (assembly files)
+        if: inputs.include-assembly-files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project-name }}-dev-latest-assembly
+          path: |
+            output/*/bom/*.csv
+            output/*/position/*.csv
