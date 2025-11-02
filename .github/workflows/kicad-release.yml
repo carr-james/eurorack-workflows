@@ -1,0 +1,104 @@
+name: KiCad Release (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: 'Project name for the release'
+        required: true
+        type: string
+      boards:
+        description: 'JSON array of board configurations. Each board should have: name, kibot_config, pcb_path, sch_path'
+        required: true
+        type: string
+        # Example: '[{"name":"control-board","kibot_config":".kibot/jlcpcb.kibot.yaml","pcb_path":"hardware/control-board/control-board.kicad_pcb","sch_path":"hardware/control-board/control-board.kicad_sch"}]'
+      skip-checks:
+        description: 'Skip ERC and DRC checks (comma-separated, e.g., "erc,drc")'
+        required: false
+        type: string
+        default: 'erc,drc'
+
+permissions:
+  contents: write
+
+jobs:
+  generate-gerbers:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/inti-cmnb/kicad_auto:dev_k9
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y zip jq
+
+      - name: Generate fabrication files
+        run: |
+          # Parse the boards JSON array
+          echo '${{ inputs.boards }}' | jq -c '.[]' | while read board; do
+            BOARD_NAME=$(echo "$board" | jq -r '.name')
+            KIBOT_CONFIG=$(echo "$board" | jq -r '.kibot_config')
+            PCB_PATH=$(echo "$board" | jq -r '.pcb_path')
+            SCH_PATH=$(echo "$board" | jq -r '.sch_path')
+
+            echo "=========================================="
+            echo "Processing board: $BOARD_NAME"
+            echo "KiBot config: $KIBOT_CONFIG"
+            echo "PCB: $PCB_PATH"
+            echo "Schematic: $SCH_PATH"
+            echo "=========================================="
+
+            kibot \
+              -c "$KIBOT_CONFIG" \
+              -b "$PCB_PATH" \
+              -e "$SCH_PATH" \
+              -d "output/$BOARD_NAME" \
+              -s ${{ inputs.skip-checks }}
+          done
+
+      - name: Create ZIP archives for manufacturers
+        run: |
+          cd output
+          echo '${{ inputs.boards }}' | jq -r '.[].name' | while read BOARD_NAME; do
+            if [ -d "$BOARD_NAME/gerbers" ]; then
+              echo "Creating ZIP for $BOARD_NAME"
+              (cd "$BOARD_NAME/gerbers" && zip -r "../../${BOARD_NAME}-gerbers.zip" *)
+            fi
+          done
+
+      - name: Prepare artifact list
+        id: artifact-list
+        run: |
+          # Build the artifact paths dynamically
+          PATHS=""
+          echo '${{ inputs.boards }}' | jq -r '.[].name' | while read BOARD_NAME; do
+            echo "output/${BOARD_NAME}-gerbers.zip" >> /tmp/artifact-paths.txt
+            echo "output/${BOARD_NAME}/bom/*.csv" >> /tmp/artifact-paths.txt
+            echo "output/${BOARD_NAME}/position/*.csv" >> /tmp/artifact-paths.txt
+          done
+
+          # Store for next steps
+          cat /tmp/artifact-paths.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project-name }}-${{ github.ref_name }}
+          path: |
+            output/*-gerbers.zip
+            output/*/bom/*.csv
+            output/*/position/*.csv
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: ${{ inputs.project-name }} ${{ github.ref_name }}
+          files: |
+            output/*-gerbers.zip
+            output/*/bom/*.csv
+            output/*/position/*.csv
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
