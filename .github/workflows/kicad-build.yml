@@ -145,9 +145,10 @@ jobs:
       - name: Generate build metadata
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          PROJECT="${{ inputs.project-name }}"
 
           echo '${{ inputs.boards }}' | jq -r '.[].name' | while read BOARD_NAME; do
-            cat > "artifacts/${BOARD_NAME}/BUILD_INFO.txt" << EOF
+            cat > "artifacts/${BOARD_NAME}/${PROJECT}_${BOARD_NAME}_${VERSION}_BUILD_INFO.txt" << EOF
           Build Information
           =================
           Project: ${{ inputs.project-name }}
@@ -200,7 +201,7 @@ jobs:
             - **Gerbers ZIP**: Ready for PCB manufacturer upload
             - **Interactive BOM (HTML)**: Visual component placement guide
             ${{ inputs.include-assembly-files && '- **Assembly Files**: BOM and position files for SMT assembly services' || '' }}
-            - **BUILD_INFO.txt**: Complete build metadata
+            - **BUILD_INFO**: Complete build metadata and version information
 
             Generated from commit ${{ github.sha }}
         env:
