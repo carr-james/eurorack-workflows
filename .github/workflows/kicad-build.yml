@@ -62,7 +62,7 @@ jobs:
       - name: Set version info
         id: version
         run: |
-          if [ "${{ inputs.build-type }}" == "release" ]; then
+          if [ "${{ inputs.build-type }}" = "release" ]; then
             # For releases, use the tag name or branch name
             VERSION="${{ github.ref_name }}"
           else
@@ -127,7 +127,7 @@ jobs:
             fi
 
             # Copy assembly files if requested
-            if [ "${{ inputs.include-assembly-files }}" == "true" ]; then
+            if [ "${{ inputs.include-assembly-files }}" = "true" ]; then
               mkdir -p "artifacts/${BOARD_NAME}/assembly"
 
               if [ -f "output/$BOARD_NAME/bom/"*.csv ]; then
