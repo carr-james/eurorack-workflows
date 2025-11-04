@@ -1,0 +1,207 @@
+name: KiCad Build (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: 'Project name for the build'
+        required: true
+        type: string
+      boards:
+        description: 'JSON array of board configurations. Each board should have: name, kibot_config, pcb_path, sch_path'
+        required: true
+        type: string
+        # Example: '[{"name":"control-board","kibot_config":".kibot/jlcpcb.kibot.yaml","pcb_path":"hardware/control-board/control-board.kicad_pcb","sch_path":"hardware/control-board/control-board.kicad_sch"}]'
+      build-type:
+        description: 'Type of build: "dev" or "release"'
+        required: true
+        type: string
+      skip-checks:
+        description: 'Skip ERC and DRC checks (comma-separated, e.g., "erc,drc")'
+        required: false
+        type: string
+        default: 'erc,drc'
+      include-assembly-files:
+        description: 'Include BOM and position CSV files for assembly services (e.g., JLCPCB SMT)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  # Delete old dev artifacts to keep only the latest
+  cleanup:
+    if: inputs.build-type == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete previous dev build artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: ${{ inputs.project-name }}-dev-latest
+          failOnError: false
+
+  build:
+    needs: [cleanup]
+    if: always() && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped')
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/inti-cmnb/kicad_auto:dev_k9
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for proper version info
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y zip jq
+
+      - name: Set version info
+        id: version
+        run: |
+          if [ "${{ inputs.build-type }}" == "release" ]; then
+            # For releases, use the tag name or branch name
+            VERSION="${{ github.ref_name }}"
+          else
+            # For dev builds, use short commit SHA and date
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            BUILD_DATE=$(date +%Y%m%d-%H%M%S)
+            VERSION="dev-${SHORT_SHA}-${BUILD_DATE}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "Build version: ${VERSION}"
+
+      - name: Generate fabrication files
+        run: |
+          # Parse the boards JSON array
+          echo '${{ inputs.boards }}' | jq -c '.[]' | while read board; do
+            BOARD_NAME=$(echo "$board" | jq -r '.name')
+            KIBOT_CONFIG=$(echo "$board" | jq -r '.kibot_config')
+            PCB_PATH=$(echo "$board" | jq -r '.pcb_path')
+            SCH_PATH=$(echo "$board" | jq -r '.sch_path')
+
+            echo "=========================================="
+            echo "Processing board: $BOARD_NAME"
+            echo "KiBot config: $KIBOT_CONFIG"
+            echo "PCB: $PCB_PATH"
+            echo "Schematic: $SCH_PATH"
+            echo "=========================================="
+
+            kibot \
+              -c "$KIBOT_CONFIG" \
+              -b "$PCB_PATH" \
+              -e "$SCH_PATH" \
+              -d "output/$BOARD_NAME" \
+              -s ${{ inputs.skip-checks }}
+          done
+
+      - name: Organize and rename artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PROJECT="${{ inputs.project-name }}"
+
+          # Create organized structure
+          mkdir -p artifacts
+
+          echo '${{ inputs.boards }}' | jq -r '.[].name' | while read BOARD_NAME; do
+            echo "Organizing artifacts for board: $BOARD_NAME"
+
+            # Create board directory
+            mkdir -p "artifacts/${BOARD_NAME}"
+
+            # Copy and rename gerbers
+            if [ -d "output/$BOARD_NAME/gerbers" ]; then
+              (cd "output/$BOARD_NAME/gerbers" && \
+               zip -r "../../../artifacts/${BOARD_NAME}/${PROJECT}_${BOARD_NAME}_${VERSION}_gerbers.zip" *)
+            fi
+
+            # Copy and rename iBOM
+            if [ -f "output/$BOARD_NAME/ibom/"*.html ]; then
+              cp "output/$BOARD_NAME/ibom/"*.html \
+                 "artifacts/${BOARD_NAME}/${PROJECT}_${BOARD_NAME}_${VERSION}_ibom.html"
+            fi
+
+            # Copy assembly files if requested
+            if [ "${{ inputs.include-assembly-files }}" == "true" ]; then
+              mkdir -p "artifacts/${BOARD_NAME}/assembly"
+
+              if [ -f "output/$BOARD_NAME/bom/"*.csv ]; then
+                cp "output/$BOARD_NAME/bom/"*.csv \
+                   "artifacts/${BOARD_NAME}/assembly/${PROJECT}_${BOARD_NAME}_${VERSION}_bom.csv"
+              fi
+
+              if [ -f "output/$BOARD_NAME/position/"*.csv ]; then
+                cp "output/$BOARD_NAME/position/"*.csv \
+                   "artifacts/${BOARD_NAME}/assembly/${PROJECT}_${BOARD_NAME}_${VERSION}_position.csv"
+              fi
+            fi
+          done
+
+      - name: Generate build metadata
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo '${{ inputs.boards }}' | jq -r '.[].name' | while read BOARD_NAME; do
+            cat > "artifacts/${BOARD_NAME}/BUILD_INFO.txt" << EOF
+          Build Information
+          =================
+          Project: ${{ inputs.project-name }}
+          Board: ${BOARD_NAME}
+          Build Type: ${{ inputs.build-type }}
+          Version: ${VERSION}
+
+          Git Information
+          ---------------
+          Commit: ${{ github.sha }}
+          Short SHA: ${{ steps.version.outputs.short_sha }}
+          Branch/Tag: ${{ github.ref_name }}
+          Repository: ${{ github.repository }}
+
+          Build Details
+          -------------
+          Build Date: ${{ steps.version.outputs.build_date }}
+          Workflow: ${{ github.workflow }}
+          Run Number: ${{ github.run_number }}
+          Run ID: ${{ github.run_id }}
+
+          Configuration
+          -------------
+          Skip Checks: ${{ inputs.skip-checks }}
+          Include Assembly: ${{ inputs.include-assembly-files }}
+
+          Generated by GitHub Actions
+          EOF
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build-type == 'dev' && format('{0}-dev-latest', inputs.project-name) || format('{0}-{1}', inputs.project-name, github.ref_name) }}
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: inputs.build-type == 'release' && startsWith(github.ref, 'refs/tags/')
+        with:
+          name: ${{ inputs.project-name }} ${{ github.ref_name }}
+          files: artifacts/**/*
+          body: |
+            ## 📦 Release Artifacts
+
+            This release includes fabrication files for the following boards:
+            ${{ inputs.boards }}
+
+            ### Contents per board:
+            - **Gerbers ZIP**: Ready for PCB manufacturer upload
+            - **Interactive BOM (HTML)**: Visual component placement guide
+            ${{ inputs.include-assembly-files && '- **Assembly Files**: BOM and position files for SMT assembly services' || '' }}
+            - **BUILD_INFO.txt**: Complete build metadata
+
+            Generated from commit ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
